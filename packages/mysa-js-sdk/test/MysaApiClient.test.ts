@@ -1,6 +1,7 @@
 import { MqttPublishError, MysaApiError } from '@/api/Errors';
 import { MysaApiClient } from '@/api/MysaApiClient';
 import { Devices } from '@/types/rest';
+import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const BB_ID = 'bb0000000001';
@@ -18,6 +19,8 @@ interface ClientInternals {
   _getFreshSession: () => Promise<unknown>;
   _getMqttConnection: () => Promise<unknown>;
   _publishWithRetry: (...args: unknown[]) => Promise<void>;
+  _resetMqttConnection: (reason: string) => Promise<void>;
+  _mqttConnectionPromise?: Promise<unknown>;
   _cognitoUser?: unknown;
 }
 
@@ -225,5 +228,45 @@ describe('MysaApiClient.startRealtimeUpdates', () => {
     expect(publish).toHaveBeenCalledTimes(4);
 
     await client.stopRealtimeUpdates(BB_ID);
+  });
+});
+
+describe('MysaApiClient connection reset', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('survives an error emitted by the connection it tears down', async () => {
+    const { client } = setup();
+    const internals = client as unknown as ClientInternals;
+
+    // Like aws-crt's MqttClientConnection: a default no-op 'error' handler installed at construction, and the
+    // cancelled in-flight operation re-emitted as an 'error' event after disconnect.
+    const oldConnection = Object.assign(new EventEmitter(), {
+      disconnect: vi.fn(async () => {
+        process.nextTick(() => oldConnection.emit('error', new Error('AWS_ERROR_MQTT_CANCELLED_FOR_CLEAN_SESSION')));
+      })
+    });
+    oldConnection.on('error', () => {});
+    internals._mqttConnectionPromise = Promise.resolve(oldConnection);
+
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => uncaught.push(e);
+    process.on('uncaughtException', onUncaught);
+
+    try {
+      const reset = internals._resetMqttConnection('test');
+      await vi.advanceTimersByTimeAsync(60 * 1000);
+      await reset;
+    } finally {
+      process.off('uncaughtException', onUncaught);
+    }
+
+    expect(oldConnection.disconnect).toHaveBeenCalled();
+    expect(uncaught).toEqual([]);
   });
 });

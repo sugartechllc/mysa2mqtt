@@ -1413,6 +1413,11 @@ export class MysaApiClient {
         try {
           const connection = await connectionToClose;
           connection.removeAllListeners();
+          // aws-crt installs a no-op 'error' handler in the connection constructor, and removeAllListeners() just
+          // removed it. Tearing the connection down cancels in-flight operations (e.g. CANCELLED_FOR_CLEAN_SESSION)
+          // and each one is re-emitted as an 'error' event, which Node turns into an uncaught exception, and a
+          // process exit, when nothing is listening. Put a no-op handler back before disconnecting.
+          connection.on('error', () => {});
           await connection.disconnect();
         } catch (err) {
           this._logger.debug('Error tearing down old MQTT connection during reset (ignored)', err);
